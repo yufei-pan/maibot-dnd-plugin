@@ -66,6 +66,10 @@ class SessionSectionConfig(PluginConfigBase):
         default=5 * 1024 * 1024,
         description="规则书 URL 抓取最大字节数",
     )
+    maibot_person_id: str = Field(
+        default="",
+        description="麦麦 person_id（留空则在 on_load 时从 bot.qq_account 解析）",
+    )
 
 
 class MechanicsSectionConfig(PluginConfigBase):

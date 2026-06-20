@@ -2,17 +2,19 @@
 
 Plan: docs/superpowers/plans/2026-06-19-maibot-dnd-plugin.md
 
-Task 1: complete (5f78058, smoke test pass)
-Task 2: complete (bb1c2ad, test_store pass)
-Task 3: complete (71535cd, test_dice pass)
-Task 4: complete (5ce3064, test_readiness pass)
-Task 5: complete (bundled with Task 6, test_permissions pass)
-Task 6: complete (test_turn pass, 24 tests total)
-Task 7: complete (test_broadcast pass, 28 tests total)
-Task 8: complete (test_gm_parser pass, 34 tests total)
-Task 9: complete (test_broker + full pytest pass, 35 tests total)
-Task 10: complete (hooks/event wiring + test_hooks, full pytest pass)
-Task 11: complete (setup tools + test_setup, 41 tests)
-Task 12: complete (play tools + lookup commands + test_play_tools, 63 tests)
-Task 11: complete (setup tools + bible commands, 41 tests)
-Task 14: complete (README + smoke tests, 53 tests)
+Task 1: complete (5f78058)
+Task 2: complete (bb1c2ad)
+Task 3: complete (71535cd)
+Task 4: complete (5ce3064)
+Task 5: complete (55a77d6)
+Task 6: complete (6824efe)
+Task 7: complete (a52735d)
+Task 8: complete (56221ee)
+Task 9: complete (9e9c728)
+Task 10: complete (1f5f2d7)
+Task 11: complete (30e5427)
+Task 12: complete (09ae525)
+Task 13: complete (2929f5e)
+Task 14: complete (884b211)
+
+Final verification: 63 pytest passed, smoke_test ok

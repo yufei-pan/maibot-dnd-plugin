@@ -58,3 +58,27 @@ def test_new_allowed_without_session() -> None:
 def test_restart_only_when_stopped() -> None:
     session = {"status": "running", "creator_id": "c1"}
     assert can("c1", "restart", session, admin_ids=[], open_mode=False, enrolled=set()) is False
+
+
+def test_enrolled_can_leave() -> None:
+    session = {"status": "running", "creator_id": "c1"}
+    assert can("p1", "leave", session, admin_ids=[], open_mode=False, enrolled={"p1"}) is True
+    assert can("x1", "leave", session, admin_ids=[], open_mode=False, enrolled={"p1"}) is False
+
+
+def test_turn_visible_to_anyone() -> None:
+    session = {"status": "running", "creator_id": "c1"}
+    assert can("stranger", "turn", session, admin_ids=[], open_mode=False, enrolled=set()) is True
+
+
+def test_skip_creator_or_admin_when_running() -> None:
+    session = {"status": "running", "creator_id": "c1"}
+    assert can("c1", "skip", session, admin_ids=[], open_mode=False, enrolled=set()) is True
+    assert can("p1", "skip", session, admin_ids=[], open_mode=False, enrolled={"p1"}) is False
+    assert can("admin1", "skip", session, admin_ids=["admin1"], open_mode=False, enrolled=set()) is True
+
+
+def test_ooc_requires_enrolled_running() -> None:
+    session = {"status": "running", "creator_id": "c1"}
+    assert can("p1", "ooc", session, admin_ids=[], open_mode=False, enrolled={"p1"}) is True
+    assert can("p1", "ooc", session, admin_ids=[], open_mode=False, enrolled=set()) is False

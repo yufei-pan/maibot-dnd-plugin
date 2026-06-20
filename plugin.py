@@ -51,6 +51,7 @@ class DndPlugin(MaiBotPlugin):
         self._mai_person_id = ""
 
     async def on_load(self) -> None:
+        await self._resolve_mai_person_id()
         self.ctx.logger.info("地下城插件已加载")
 
     async def on_unload(self) -> None:
@@ -113,6 +114,26 @@ class DndPlugin(MaiBotPlugin):
     def _permission_context(self) -> tuple[list[str], bool]:
         cfg = self.config
         return list(cfg.permissions.admin_qq_ids), bool(cfg.permissions.open_mode)
+
+    def _lifecycle_actor_kwargs(self, user_id: str) -> dict[str, Any]:
+        admin_ids, open_mode = self._permission_context()
+        return {"actor_id": user_id, "admin_ids": admin_ids, "open_mode": open_mode}
+
+    async def _resolve_mai_person_id(self) -> None:
+        override = str(self.config.session.maibot_person_id or "").strip()
+        if override:
+            self._mai_person_id = override
+            return
+        qq_account = await self.ctx.config.get("bot.qq_account", "")
+        if not qq_account:
+            self.ctx.logger.warning("地下城：未配置 bot.qq_account，无法解析麦麦 person_id")
+            return
+        person_id = await self.ctx.person.get_id("qq", str(qq_account))
+        if not person_id:
+            self.ctx.logger.warning("地下城：无法解析麦麦 person_id（qq=%s）", qq_account)
+            return
+        self._mai_person_id = str(person_id)
+        self.ctx.logger.info("地下城：麦麦 person_id=%s", self._mai_person_id)
 
     def _check(
         self,
@@ -252,12 +273,18 @@ class DndPlugin(MaiBotPlugin):
             await self._send(stream_id, "你没有权限创建会话。")
             return False, "权限不足", 2
         lifecycle = self._lifecycle()
-        try:
-            record = lifecycle.new(stream_id=stream_id, title=title, creator_id=user_id)
-        except ValueError as exc:
-            await self._send(stream_id, str(exc))
-            return False, str(exc), 2
-        await self._send(stream_id, f"已创建会话「{record.title}」（ID: {record.session_id}）。")
+        admin_ids, open_mode = self._permission_context()
+        result = lifecycle.new(
+            stream_id=stream_id,
+            title=title,
+            creator_id=user_id,
+            admin_ids=admin_ids,
+            open_mode=open_mode,
+        )
+        if not result.ok:
+            await self._send(stream_id, result.message)
+            return False, result.message, 2
+        await self._send(stream_id, result.message)
         return True, "已创建会话", 1
 
     @Command("dnd_list", description="列出本聊天的地下城会话", pattern=r"^/dnd\s+list\s*$")
@@ -305,16 +332,19 @@ class DndPlugin(MaiBotPlugin):
             await self._send(stream_id, error)
             return False, error, 2
         assert record is not None
-        missing = lifecycle.start(record, ability_keys=list(self.config.mechanics.ability_scores))
-        if missing:
-            checklist = "启动前仍需完成：\n" + "\n".join(f"- {item}" for item in missing)
-            await self._send(stream_id, checklist)
+        result = lifecycle.start(
+            stream_id=stream_id,
+            ability_keys=list(self.config.mechanics.ability_scores),
+            **self._lifecycle_actor_kwargs(user_id),
+        )
+        if not result.ok:
+            await self._send(stream_id, result.message)
             return False, "就绪检查未通过", 2
-        record = lifecycle.resolve_active(stream_id)
+        record = result.session
         assert record is not None
         self._coordinator_for(stream_id, record)
         await self._opening_beat_stub(stream_id)
-        await self._send(stream_id, "会话已进入进行中状态。")
+        await self._send(stream_id, result.message)
         return True, "会话已启动", 1
 
     @Command("dnd_stop", description="停止进行中的地下城会话", pattern=r"^/dnd\s+stop\s*$")
@@ -326,13 +356,12 @@ class DndPlugin(MaiBotPlugin):
             await self._send(stream_id, error)
             return False, error, 2
         assert record is not None
-        try:
-            lifecycle.stop(record)
-        except ValueError as exc:
-            await self._send(stream_id, str(exc))
-            return False, str(exc), 2
+        result = lifecycle.stop(stream_id=stream_id, **self._lifecycle_actor_kwargs(user_id))
+        if not result.ok:
+            await self._send(stream_id, result.message)
+            return False, result.message, 2
         self._drop_coordinator(stream_id)
-        await self._send(stream_id, "会话已停止。")
+        await self._send(stream_id, result.message)
         return True, "会话已停止", 1
 
     @Command(
@@ -360,12 +389,15 @@ class DndPlugin(MaiBotPlugin):
         if not self._check(user_id, "restart", record, enrolled):
             await self._send(stream_id, "你没有权限重启此会话。")
             return False, "权限不足", 2
-        try:
-            lifecycle.restart(record)
-        except ValueError as exc:
-            await self._send(stream_id, str(exc))
-            return False, str(exc), 2
-        await self._send(stream_id, f"会话「{record.title}」已重置为 setup，请重新 /dnd review 后 /dnd start。")
+        result = lifecycle.restart(
+            stream_id=stream_id,
+            session_id=record.session_id,
+            **self._lifecycle_actor_kwargs(user_id),
+        )
+        if not result.ok:
+            await self._send(stream_id, result.message)
+            return False, result.message, 2
+        await self._send(stream_id, result.message)
         return True, "会话已重启", 1
 
     @Command(
@@ -385,8 +417,15 @@ class DndPlugin(MaiBotPlugin):
             await self._send(stream_id, error)
             return False, error, 2
         assert record is not None
-        lifecycle.handoff(record, target)
-        await self._send(stream_id, f"会话创建者已移交给 {target}。")
+        result = lifecycle.handoff(
+            stream_id=stream_id,
+            new_creator_id=target,
+            **self._lifecycle_actor_kwargs(user_id),
+        )
+        if not result.ok:
+            await self._send(stream_id, result.message)
+            return False, result.message, 2
+        await self._send(stream_id, result.message)
         return True, "已移交", 1
 
     @Command("dnd_join", description="报名加入当前地下城会话", pattern=r"^/dnd\s+join\s*$")

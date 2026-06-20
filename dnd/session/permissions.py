@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from typing import Any
 
-LIFECYCLE_ACTIONS = frozenset({"new", "start", "stop", "restart", "handoff", "setup"})
-PLAY_ACTIONS = frozenset({"join", "proceed"})
-VALID_ACTIONS = LIFECYCLE_ACTIONS | PLAY_ACTIONS
+LIFECYCLE_ACTIONS = frozenset({"new", "start", "stop", "restart", "handoff", "setup", "skip"})
+PLAY_ACTIONS = frozenset({"join", "proceed", "leave", "ooc"})
+QUERY_ACTIONS = frozenset({"turn"})
+VALID_ACTIONS = LIFECYCLE_ACTIONS | PLAY_ACTIONS | QUERY_ACTIONS
 
 _OPEN_MODE_LIFECYCLE = frozenset({"setup", "start", "stop", "restart", "handoff", "new"})
 
@@ -64,6 +65,24 @@ def can(
 
     if verb == "proceed":
         return is_enrolled and status == "running"
+
+    if verb == "turn":
+        return True
+
+    if verb == "leave":
+        return is_enrolled
+
+    if verb == "ooc":
+        return is_enrolled and status == "running"
+
+    if verb == "skip":
+        if status != "running":
+            return False
+        if open_mode:
+            return True
+        if config_admin or creator:
+            return True
+        return False
 
     if verb == "join":
         return True
