@@ -1,0 +1,26 @@
+# 地下城 (MaiBot D&D) 插件配置
+#
+# 各节里的字段留空（或整行注释掉）即使用插件代码中的内置默认；仅在需要覆盖时再填写。
+
+[plugin]
+enabled = true
+config_version = "0.1.0"
+
+[permissions]
+admin_qq_ids = []
+open_mode = false
+
+[session]
+debounce_seconds = 45
+gm_model = "planner"
+gm_context_char_budget = 120000
+recent_beats_limit = 10
+
+[mechanics]
+base_system = "5e-lite"
+ability_scores = ["str", "dex", "con", "int", "wis", "cha"]
+
+[broadcast]
+system_prefix_gm = "【地下城·GM】"
+system_prefix = "【地下城】"
+sync_to_maisaka_history = true
