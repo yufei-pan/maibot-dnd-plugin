@@ -6,13 +6,22 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from maibot_sdk import Command, MaiBotPlugin, Tool
-from maibot_sdk.types import ToolParameterInfo, ToolParamType
+from maibot_sdk import Command, EventHandler, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk.types import EventType, HookMode, ToolParameterInfo, ToolParamType
 
 from dnd import setup as dnd_setup
 from dnd.broadcast import broadcast_system
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config
 from dnd.gm.broker import run_beat
+from dnd.hooks import (
+    build_player_briefing,
+    extract_plain_text,
+    is_running,
+    load_character_name,
+    load_scene_brief,
+    resolve_stream_id,
+    resolve_user_id,
+)
 from dnd.session.lifecycle import LifecycleService
 from dnd.session.permissions import can
 from dnd.store import SessionRecord, SessionStore
@@ -56,21 +65,33 @@ class DndPlugin(MaiBotPlugin):
 
     @staticmethod
     def _resolve_stream_id(kwargs: dict[str, Any]) -> str:
-        for key in ("stream_id", "session_id", "chat_id"):
-            value = str(kwargs.get(key) or "").strip()
-            if value:
-                return value
-        return ""
+        return resolve_stream_id(kwargs)
 
     @staticmethod
     def _resolve_user_id(kwargs: dict[str, Any]) -> str:
-        direct = str(kwargs.get("user_id") or "").strip()
-        if direct:
-            return direct
-        uinfo = kwargs.get("user_info")
-        if isinstance(uinfo, dict):
-            return str(uinfo.get("user_id") or "").strip()
-        return ""
+        return resolve_user_id(kwargs)
+
+    def _resolve_running_session(self, stream_id: str) -> tuple[LifecycleService, SessionRecord | None]:
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None or not is_running(record.status):
+            return lifecycle, None
+        return lifecycle, record
+
+    def _append_inbox_message(self, *, stream_id: str, player_id: str, text: str, ooc: bool = False) -> None:
+        lifecycle, record = self._resolve_running_session(stream_id)
+        if record is None:
+            return
+
+        enrolled = lifecycle.enrolled_ids(record)
+        if player_id not in enrolled:
+            return
+
+        coordinator = self._coordinator_for(stream_id, record)
+        coordinator.append({"player_id": player_id, "text": text, "ooc": ooc})
+        active_player, _ = lifecycle.turn_state(record)
+        if active_player == player_id:
+            coordinator.on_active_player_message(player_id)
 
     def _session_meta(self, record: SessionRecord) -> dict[str, Any]:
         root = record.root
@@ -756,6 +777,89 @@ class DndPlugin(MaiBotPlugin):
         result = dnd_setup.dict_query(record.root, term)
         await self._send(stream_id, str(result["content"]))
         return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @HookHandler("maisaka.replyer.after_response", mode=HookMode.BLOCKING)
+    async def hook_capture_mai_reply(self, **kwargs: Any) -> dict[str, Any]:
+        """捕获 MaiBot 回复并写入 DND 回合收件箱。"""
+        stream_id = resolve_stream_id(kwargs)
+        if not stream_id:
+            return {"action": "continue"}
+
+        bot_person_id = str(self._mai_person_id or "").strip()
+        if not bot_person_id:
+            return {"action": "continue"}
+
+        lifecycle, record = self._resolve_running_session(stream_id)
+        if record is None:
+            return {"action": "continue"}
+        if bot_person_id not in lifecycle.enrolled_ids(record):
+            return {"action": "continue"}
+
+        response = str(kwargs.get("response") or "").strip()
+        if not response:
+            return {"action": "continue"}
+
+        self._append_inbox_message(stream_id=stream_id, player_id=bot_person_id, text=response)
+        return {"action": "continue"}
+
+    @HookHandler("maisaka.replyer.before_model_request", mode=HookMode.BLOCKING)
+    async def hook_inject_mai_player_briefing(self, **kwargs: Any) -> dict[str, Any]:
+        """在 MaiBot replyer 请求模型前注入玩家简报。"""
+        stream_id = resolve_stream_id(kwargs)
+        if not stream_id:
+            return {"action": "continue"}
+
+        bot_person_id = str(self._mai_person_id or "").strip()
+        if not bot_person_id:
+            return {"action": "continue"}
+
+        lifecycle, record = self._resolve_running_session(stream_id)
+        if record is None:
+            return {"action": "continue"}
+        if bot_person_id not in lifecycle.enrolled_ids(record):
+            return {"action": "continue"}
+
+        messages = kwargs.get("messages")
+        if not isinstance(messages, list):
+            return {"action": "continue"}
+
+        character_name = load_character_name(record.root, bot_person_id)
+        scene_brief = load_scene_brief(record.root)
+        briefing = build_player_briefing(character_name, scene_brief)
+
+        insert_at = 0
+        for index, item in enumerate(messages):
+            if isinstance(item, dict) and item.get("role") == "system":
+                insert_at = index + 1
+        messages.insert(insert_at, {"role": "user", "content": briefing})
+        kwargs["messages"] = messages
+        return {"action": "continue", "modified_kwargs": kwargs}
+
+    @EventHandler("dnd_capture_enrolled_human_message", event_type=EventType.ON_MESSAGE)
+    async def event_capture_enrolled_human_message(self, message: Any = None, **kwargs: Any) -> None:
+        """捕获进行中会话里报名人类玩家发言并写入 inbox。"""
+        payload: dict[str, Any] = dict(kwargs)
+        if message is not None:
+            payload["message"] = message
+
+        stream_id = resolve_stream_id(payload)
+        if not stream_id:
+            return None
+
+        user_id = resolve_user_id(payload)
+        if not user_id:
+            return None
+
+        bot_person_id = str(self._mai_person_id or "").strip()
+        if bot_person_id and user_id == bot_person_id:
+            return None
+
+        text = extract_plain_text(message, payload)
+        if not text or text.startswith("/dnd"):
+            return None
+
+        self._append_inbox_message(stream_id=stream_id, player_id=user_id, text=text)
+        return None
 
 
 def create_plugin() -> DndPlugin:
