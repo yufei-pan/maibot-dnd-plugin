@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from typing import Any
+from typing import Awaitable, Callable
 
 from dnd.turn.inbox import Inbox, InboxMessage
+
+FlushCallback = Callable[[str, list[InboxMessage]], Awaitable[None]]
 
 
 class TurnCoordinator:
     """管理活跃玩家发言后的防抖计时与 inbox 冲刷。"""
 
-    def __init__(self, *, debounce_seconds: float) -> None:
+    def __init__(self, *, debounce_seconds: float, flush_callback: FlushCallback | None = None) -> None:
         self.debounce_seconds = float(debounce_seconds)
         self.debounce_scheduled = False
         self.debounce_generation = 0
@@ -22,6 +25,7 @@ class TurnCoordinator:
         self._initiative: list[str] = []
         self._active_has_spoken = False
         self._debounce_task: asyncio.Task[None] | None = None
+        self._flush_callback = flush_callback
 
     def set_active(self, player_id: str) -> None:
         """设置当前活跃玩家。"""
@@ -30,6 +34,10 @@ class TurnCoordinator:
     def set_initiative(self, order: list[str]) -> None:
         """设置先攻顺序（仅供标注 initiative_distance）。"""
         self._initiative = [str(item).strip() for item in order if str(item).strip()]
+
+    def set_flush_callback(self, callback: FlushCallback | None) -> None:
+        """设置 flush 完成后的异步回调。"""
+        self._flush_callback = callback
 
     def append(self, msg: InboxMessage | Mapping[str, Any]) -> None:
         """追加消息并打上活跃/先攻距离标签。"""
@@ -77,6 +85,17 @@ class TurnCoordinator:
         self._active_has_spoken = False
         return self._inbox.drain()
 
+    async def dispatch_flush(self, reason: str, flushed: list[InboxMessage]) -> None:
+        """将已冲刷的消息交给外部回调处理。"""
+        callback = self._flush_callback
+        if callback is None:
+            return
+        await callback(reason, flushed)
+
+    def requeue(self, messages: list[InboxMessage]) -> None:
+        """当 beat 失败时将消息放回队列。"""
+        self._inbox.extend_front(messages)
+
     def complete_processing(self) -> None:
         """GM 节拍结束后释放处理锁。"""
         self.processing = False
@@ -118,7 +137,8 @@ class TurnCoordinator:
             self.debounce_scheduled = False
             return
         self.debounce_scheduled = False
-        self.flush("debounce")
+        flushed = self.flush("debounce")
+        await self.dispatch_flush("debounce", flushed)
 
     def _cancel_debounce_task_only(self) -> None:
         task = self._debounce_task

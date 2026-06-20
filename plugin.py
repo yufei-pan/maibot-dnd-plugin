@@ -9,6 +9,7 @@ from maibot_sdk import Command, MaiBotPlugin
 
 from dnd.broadcast import broadcast_system
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config
+from dnd.gm.broker import run_beat
 from dnd.session.lifecycle import LifecycleService
 from dnd.session.permissions import can
 from dnd.store import SessionRecord, SessionStore
@@ -27,6 +28,7 @@ class DndPlugin(MaiBotPlugin):
         super().__init__()
         self._plugin_dir = Path(__file__).resolve().parent
         self._coordinators: dict[str, TurnCoordinator] = {}
+        self._mai_person_id = ""
 
     async def on_load(self) -> None:
         self.ctx.logger.info("地下城插件已加载")
@@ -99,6 +101,9 @@ class DndPlugin(MaiBotPlugin):
         coordinator = TurnCoordinator(debounce_seconds=float(self.config.session.debounce_seconds))
         coordinator.set_active(active)
         coordinator.set_initiative(initiative)
+        coordinator.set_flush_callback(
+            lambda reason, flushed: self._handle_flush(stream_id, coordinator, reason, flushed)
+        )
         self._coordinators[stream_id] = coordinator
         return coordinator
 
@@ -125,14 +130,35 @@ class DndPlugin(MaiBotPlugin):
             return record, lifecycle, enrolled, "你没有权限执行此操作。"
         return record, lifecycle, enrolled, None
 
-    async def _flush_beat_stub(self, stream_id: str, record: SessionRecord, reason: str, count: int) -> None:
-        """Task 7 前占位：冲刷 inbox 后释放处理锁。"""
-        del record
-        coordinator = self._coordinators.get(stream_id)
-        if coordinator is None:
+    async def _handle_flush(
+        self,
+        stream_id: str,
+        coordinator: TurnCoordinator,
+        reason: str,
+        flushed: list[Any],
+    ) -> None:
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None or record.status != "running":
+            coordinator.complete_processing()
             return
-        coordinator.complete_processing()
-        self.ctx.logger.info("地下城节拍冲刷（%s），收件 %d 条（GM 管线待 Task 9）", reason, count)
+        try:
+            result = await run_beat(self.ctx, self, record, flushed, self.config, reason=reason)
+            active, initiative = lifecycle.turn_state(record)
+            coordinator.set_active(active)
+            coordinator.set_initiative(initiative)
+            self.ctx.logger.info(
+                "地下城节拍完成（%s），beat=%s，收件=%d，掷骰=%d",
+                reason,
+                result.beat_id,
+                result.inbox_count,
+                result.roll_count,
+            )
+        except Exception as exc:
+            coordinator.requeue(flushed)
+            await self._send(stream_id, f"GM 节拍执行失败：{exc}。收件箱已保留，可稍后 /dnd proceed 重试。")
+        finally:
+            coordinator.complete_processing()
 
     async def _opening_beat_stub(self, stream_id: str) -> None:
         await self._send(stream_id, "会话已开始，等待 GM 开场…")
@@ -342,7 +368,7 @@ class DndPlugin(MaiBotPlugin):
         if flushed is None:
             await self._send(stream_id, "GM 节拍处理中，请稍后再试。")
             return False, "处理中", 2
-        await self._flush_beat_stub(stream_id, record, "proceed", len(flushed))
+        await coordinator.dispatch_flush("proceed", flushed)
         await self._send(stream_id, f"已推进节拍（收件 {len(flushed)} 条）。")
         return True, "已推进", 1
 
@@ -390,7 +416,7 @@ class DndPlugin(MaiBotPlugin):
         if flushed is None:
             await self._send(stream_id, "GM 节拍处理中，请稍后再试。")
             return False, "处理中", 2
-        await self._flush_beat_stub(stream_id, record, "skip", len(flushed))
+        await coordinator.dispatch_flush("skip", flushed)
         await self._send(stream_id, f"已跳过等待并冲刷节拍（收件 {len(flushed)} 条）。")
         return True, "已跳过", 1
 

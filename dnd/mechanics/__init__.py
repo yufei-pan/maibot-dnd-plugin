@@ -2,6 +2,7 @@
 
 from dnd.mechanics.dice import RollResult, roll_formula
 from dnd.mechanics.engine import MechanicsEngine, MechanicsOutcome
+from dnd.mechanics.items import execute_spawn_item, execute_use_item
 from dnd.mechanics.sheets import CharacterSheet
 
 __all__ = [
@@ -9,5 +10,7 @@ __all__ = [
     "MechanicsEngine",
     "MechanicsOutcome",
     "RollResult",
+    "execute_spawn_item",
+    "execute_use_item",
     "roll_formula",
 ]

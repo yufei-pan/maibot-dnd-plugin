@@ -26,6 +26,12 @@ class Inbox:
         """追加一条已标注消息。"""
         self._messages.append(msg)
 
+    def extend_front(self, messages: list[InboxMessage]) -> None:
+        """将一批消息按原顺序放回队列头部。"""
+        if not messages:
+            return
+        self._messages = list(messages) + self._messages
+
     def drain(self) -> list[InboxMessage]:
         """取出并清空全部消息。"""
         messages = list(self._messages)
