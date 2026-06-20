@@ -9,6 +9,7 @@ import httpx
 from maibot_sdk import Command, EventHandler, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import EventType, HookMode, ToolParameterInfo, ToolParamType
 
+from dnd import play as dnd_play
 from dnd import setup as dnd_setup
 from dnd.broadcast import broadcast_system
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config
@@ -179,6 +180,35 @@ class DndPlugin(MaiBotPlugin):
             return None, error
         assert record is not None
         return record, None
+
+    async def _tool_play_session(
+        self,
+        kwargs: dict[str, Any],
+        *,
+        require_running: bool = False,
+    ) -> tuple[SessionRecord | None, str | None]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None:
+            return None, "当前聊天没有进行中的地下城会话。"
+        enrolled = lifecycle.enrolled_ids(record)
+        if user_id and user_id not in enrolled:
+            return None, "你尚未报名本局。"
+        if require_running and record.status != "running":
+            return None, "仅进行中的会话可执行此操作。"
+        return record, None
+
+    async def _dispatch_proceed(self, stream_id: str, record: SessionRecord) -> tuple[bool, str, int]:
+        if record.status != "running":
+            return False, "仅进行中的会话可推进节拍。", 2
+        coordinator = self._coordinator_for(stream_id, record)
+        flushed = coordinator.request_proceed()
+        if flushed is None:
+            return False, "GM 节拍处理中，请稍后再试。", 2
+        await coordinator.dispatch_flush("proceed", flushed)
+        return True, f"已推进节拍（收件 {len(flushed)} 条）。", 1
 
     async def _handle_flush(
         self,
@@ -410,17 +440,9 @@ class DndPlugin(MaiBotPlugin):
             await self._send(stream_id, error)
             return False, error, 2
         assert record is not None
-        if record.status != "running":
-            await self._send(stream_id, "仅进行中的会话可推进节拍。")
-            return False, "未进行中", 2
-        coordinator = self._coordinator_for(stream_id, record)
-        flushed = coordinator.request_proceed()
-        if flushed is None:
-            await self._send(stream_id, "GM 节拍处理中，请稍后再试。")
-            return False, "处理中", 2
-        await coordinator.dispatch_flush("proceed", flushed)
-        await self._send(stream_id, f"已推进节拍（收件 {len(flushed)} 条）。")
-        return True, "已推进", 1
+        ok, message, code = await self._dispatch_proceed(stream_id, record)
+        await self._send(stream_id, message)
+        return ok, message, code
 
     @Command("dnd_turn", description="查看当前回合信息", pattern=r"^/dnd\s+turn\s*$")
     async def cmd_turn(self, **kwargs: Any) -> tuple[bool, str, int]:
@@ -825,6 +847,205 @@ class DndPlugin(MaiBotPlugin):
             "（图片渲染暂不可用，先用文字版角色卡。Host 浏览器环境就绪后即可出图。）\n\n" + markdown,
         )
         return True, "已发送文字版角色卡", 1
+
+    @Command(
+        "dnd_sheet",
+        description="查看角色卡 YAML",
+        pattern=r"^/dnd\s+sheet(?:\s+(?P<player_id>\S+))?\s*$",
+    )
+    async def cmd_sheet(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None:
+            await self._send(stream_id, "当前聊天没有进行中的地下城会话。")
+            return False, "无会话", 2
+        target = str(kwargs.get("player_id") or user_id).strip()
+        result = dnd_play.format_sheet(record.root, target)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command(
+        "dnd_roll",
+        description="掷骰或技能检定",
+        pattern=r"^/dnd\s+roll(?:\s+(?P<formula>.+))?\s*$",
+    )
+    async def cmd_roll(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, error = await self._tool_play_session(kwargs)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        formula = str(kwargs.get("formula") or "").strip()
+        result = dnd_play.execute_roll(record.root, user_id, formula=formula)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command("dnd_log", description="查看掷骰记录", pattern=r"^/dnd\s+log\s*$")
+    async def cmd_log(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        record, error = await self._tool_play_session(kwargs)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        result = dnd_play.query_log(record.root, limit=int(self.config.session.recent_beats_limit))
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1
+
+    @Command(
+        "dnd_map",
+        description="查看战役地图",
+        pattern=r"^/dnd\s+map(?:\s+(?P<name>\S+))?\s*$",
+    )
+    async def cmd_map(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None:
+            await self._send(stream_id, "当前聊天没有进行中的地下城会话。")
+            return False, "无会话", 2
+        name = str(kwargs.get("name") or "").strip()
+        result = dnd_play.query_map(record.root, name)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Tool(
+        "dnd_proceed",
+        brief_description="【地下城·进行中】手动推进 GM 节拍。",
+        parameters=[],
+    )
+    async def tool_proceed(self, **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_play_session(kwargs, require_running=True)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        stream_id = self._resolve_stream_id(kwargs)
+        ok, message, _ = await self._dispatch_proceed(stream_id, record)
+        return {"success": ok, "content": message}
+
+    @Tool(
+        "dnd_query_bible",
+        brief_description="【地下城·查询】检索战役圣经主题；topic 留空时列出可用主题。",
+        parameters=[
+            ToolParameterInfo(
+                name="topic",
+                param_type=ToolParamType.STRING,
+                required=False,
+                default="",
+                description="设定主题，如 world / plot-outline / combat-rules",
+            ),
+        ],
+    )
+    async def tool_query_bible(self, topic: str = "", **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_play_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        query = dnd_setup._coalesce_text(topic, kwargs, "subject", "name")
+        return dnd_play.query_bible(record.root, query)
+
+    @Tool(
+        "dnd_query_log",
+        brief_description="【地下城·查询】查看最近掷骰记录。",
+        parameters=[
+            ToolParameterInfo(
+                name="limit",
+                param_type=ToolParamType.INTEGER,
+                required=False,
+                default=20,
+                description="返回条目数上限",
+            ),
+        ],
+    )
+    async def tool_query_log(self, limit: int = 20, **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_play_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        try:
+            return dnd_play.query_log(record.root, limit=int(limit))
+        except ValueError as exc:
+            return {"success": False, "content": str(exc)}
+
+    @Tool(
+        "dnd_roll",
+        brief_description="【地下城·进行中】掷骰或技能检定。",
+        parameters=[
+            ToolParameterInfo(
+                name="formula",
+                param_type=ToolParamType.STRING,
+                required=False,
+                default="",
+                description="骰子公式，如 1d20+3",
+            ),
+            ToolParameterInfo(
+                name="skill",
+                param_type=ToolParamType.STRING,
+                required=False,
+                default="",
+                description="技能名（与 dc 联用作检定）",
+            ),
+            ToolParameterInfo(
+                name="dc",
+                param_type=ToolParamType.INTEGER,
+                required=False,
+                default=0,
+                description="技能检定 DC",
+            ),
+            ToolParameterInfo(
+                name="advantage",
+                param_type=ToolParamType.BOOLEAN,
+                required=False,
+                default=False,
+                description="优势",
+            ),
+            ToolParameterInfo(
+                name="disadvantage",
+                param_type=ToolParamType.BOOLEAN,
+                required=False,
+                default=False,
+                description="劣势",
+            ),
+        ],
+    )
+    async def tool_roll(
+        self,
+        formula: str = "",
+        skill: str = "",
+        dc: int = 0,
+        advantage: bool = False,
+        disadvantage: bool = False,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        record, error = await self._tool_play_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        user_id = self._resolve_user_id(kwargs)
+        formula_text = dnd_setup._coalesce_text(formula, kwargs, "dice", "expression")
+        skill_name = dnd_setup._coalesce_text(skill, kwargs, "skill_name")
+        dc_value = kwargs.get("dc", dc)
+        parsed_dc: int | None
+        if skill_name:
+            if dc_value in (None, "", 0):
+                parsed_dc = None
+            else:
+                parsed_dc = int(dc_value)
+        else:
+            parsed_dc = None
+        return dnd_play.execute_roll(
+            record.root,
+            user_id,
+            formula=formula_text,
+            skill=skill_name,
+            dc=parsed_dc,
+            advantage=bool(kwargs.get("advantage", advantage)),
+            disadvantage=bool(kwargs.get("disadvantage", disadvantage)),
+        )
 
     @HookHandler("maisaka.replyer.after_response", mode=HookMode.BLOCKING)
     async def hook_capture_mai_reply(self, **kwargs: Any) -> dict[str, Any]:
