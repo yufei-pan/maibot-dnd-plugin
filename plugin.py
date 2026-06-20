@@ -22,6 +22,13 @@ from dnd.hooks import (
     resolve_stream_id,
     resolve_user_id,
 )
+from dnd.render import (
+    build_card_html,
+    build_card_markdown,
+    load_character_sheet,
+    load_template,
+    render_card,
+)
 from dnd.session.lifecycle import LifecycleService
 from dnd.session.permissions import can
 from dnd.store import SessionRecord, SessionStore
@@ -777,6 +784,47 @@ class DndPlugin(MaiBotPlugin):
         result = dnd_setup.dict_query(record.root, term)
         await self._send(stream_id, str(result["content"]))
         return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command(
+        "dnd_card",
+        description="查看角色卡（PNG 或 Markdown 回退）",
+        pattern=r"^/dnd\s+card(?:\s+(?P<target>\S+))?\s*$",
+    )
+    async def cmd_card(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None:
+            await self._send(stream_id, "当前聊天没有进行中的地下城会话。")
+            return False, "无会话", 2
+
+        target = str(kwargs.get("target") or "").strip() or user_id
+        try:
+            sheet, mugshot_path = load_character_sheet(record.root, target)
+        except FileNotFoundError as exc:
+            await self._send(stream_id, str(exc))
+            return False, str(exc), 2
+
+        template = load_template(self._plugin_dir, "character_card.html")
+        fragment = build_card_html(
+            template,
+            sheet,
+            session_root=record.root,
+            mugshot_path=mugshot_path,
+            player_id=target,
+        )
+        image_b64 = await render_card(self.ctx, fragment)
+        if image_b64:
+            await self.ctx.send.image(image_b64, stream_id)
+            return True, "已发送角色卡图片", 1
+
+        markdown = build_card_markdown(sheet, player_id=target)
+        await self._send(
+            stream_id,
+            "（图片渲染暂不可用，先用文字版角色卡。Host 浏览器环境就绪后即可出图。）\n\n" + markdown,
+        )
+        return True, "已发送文字版角色卡", 1
 
     @HookHandler("maisaka.replyer.after_response", mode=HookMode.BLOCKING)
     async def hook_capture_mai_reply(self, **kwargs: Any) -> dict[str, Any]:
