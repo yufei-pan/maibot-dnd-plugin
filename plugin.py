@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from maibot_sdk import Command, MaiBotPlugin
+import httpx
+from maibot_sdk import Command, MaiBotPlugin, Tool
+from maibot_sdk.types import ToolParameterInfo, ToolParamType
 
+from dnd import setup as dnd_setup
 from dnd.broadcast import broadcast_system
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config
 from dnd.gm.broker import run_beat
@@ -129,6 +132,25 @@ class DndPlugin(MaiBotPlugin):
         if not self._check(user_id, action, record, enrolled):
             return record, lifecycle, enrolled, "你没有权限执行此操作。"
         return record, lifecycle, enrolled, None
+
+    async def _require_setup(
+        self,
+        stream_id: str,
+        user_id: str,
+    ) -> tuple[SessionRecord | None, LifecycleService, set[str], str | None]:
+        return await self._require_active(stream_id, user_id, "setup")
+
+    async def _tool_setup_session(
+        self,
+        kwargs: dict[str, Any],
+    ) -> tuple[SessionRecord | None, str | None]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, _, _, error = await self._require_setup(stream_id, user_id)
+        if error:
+            return None, error
+        assert record is not None
+        return record, None
 
     async def _handle_flush(
         self,
@@ -444,6 +466,296 @@ class DndPlugin(MaiBotPlugin):
         coordinator.append({"player_id": user_id, "text": text, "ooc": True})
         await self._send(stream_id, "场外信息已记入收件箱。")
         return True, "已记录 OOC", 1
+
+    @Tool(
+        "dnd_setup_bible",
+        brief_description="【地下城·筹备】写入/追加战役圣经 bible/<topic>.md（world、plot-outline、characters 等）。",
+        parameters=[
+            ToolParameterInfo(name="topic", param_type=ToolParamType.STRING, required=True, description="设定主题，如 world / plot-outline / characters"),
+            ToolParameterInfo(name="content", param_type=ToolParamType.STRING, required=True, description="设定内容（Markdown）"),
+            ToolParameterInfo(
+                name="mode",
+                param_type=ToolParamType.STRING,
+                required=False,
+                default="append",
+                enum_values=["append", "replace"],
+                description="追加或覆盖",
+            ),
+        ],
+    )
+    async def tool_setup_bible(
+        self,
+        topic: str = "",
+        content: str = "",
+        mode: str = "append",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        body = dnd_setup._coalesce_text(content, kwargs, "text", "body", "markdown")
+        return dnd_setup.write_bible(record.root, topic, body, mode)
+
+    @Tool(
+        "dnd_setup_gm_prompt",
+        brief_description="【地下城·筹备】写入/追加 GM 补充提示 gm-prompt.md。",
+        parameters=[
+            ToolParameterInfo(name="content", param_type=ToolParamType.STRING, required=True, description="GM 补充提示（Markdown）"),
+            ToolParameterInfo(
+                name="mode",
+                param_type=ToolParamType.STRING,
+                required=False,
+                default="replace",
+                enum_values=["append", "replace"],
+                description="追加或覆盖",
+            ),
+        ],
+    )
+    async def tool_setup_gm_prompt(self, content: str = "", mode: str = "replace", **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        body = dnd_setup._coalesce_text(content, kwargs, "text", "body", "markdown", "prompt")
+        return dnd_setup.write_gm_prompt(record.root, body, mode)
+
+    @Tool(
+        "dnd_setup_character",
+        brief_description="【地下城·筹备】写入玩家角色卡 players/<player_id>.yaml。",
+        parameters=[
+            ToolParameterInfo(name="player_id", param_type=ToolParamType.STRING, required=True, description="玩家 ID"),
+            ToolParameterInfo(name="content", param_type=ToolParamType.STRING, required=True, description="角色卡 YAML 正文"),
+            ToolParameterInfo(
+                name="mode",
+                param_type=ToolParamType.STRING,
+                required=False,
+                default="replace",
+                enum_values=["append", "replace"],
+                description="覆盖或合并字段（append 时合并 YAML 映射）",
+            ),
+        ],
+    )
+    async def tool_setup_character(
+        self,
+        player_id: str = "",
+        content: str = "",
+        mode: str = "replace",
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        body = dnd_setup._coalesce_text(content, kwargs, "yaml", "text", "body", "sheet")
+        return dnd_setup.write_character_sheet(record.root, player_id, body, mode)
+
+    @Tool(
+        "dnd_import_rulebook",
+        brief_description="【地下城·筹备】从 URL 抓取规则书，经 LLM 拆分写入 bible/rules/<topic>.md。",
+        parameters=[
+            ToolParameterInfo(name="url", param_type=ToolParamType.STRING, required=True, description="规则书 URL"),
+        ],
+    )
+    async def tool_import_rulebook(self, url: str = "", **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        target_url = dnd_setup._coalesce_text(url, kwargs, "link", "source")
+        try:
+            return await dnd_setup.import_rulebook(
+                self.ctx.llm.generate,
+                record.root,
+                target_url,
+                max_bytes=int(self.config.session.rulebook_import_max_bytes),
+                model=str(self.config.session.gm_model),
+            )
+        except (ValueError, httpx.HTTPError) as exc:
+            return {"success": False, "content": str(exc)}
+
+    @Tool(
+        "dnd_dict_set",
+        brief_description="【地下城·筹备】写入战役词典 bible/dictionary.json 词条。",
+        parameters=[
+            ToolParameterInfo(name="term", param_type=ToolParamType.STRING, required=True, description="词条"),
+            ToolParameterInfo(name="explanation", param_type=ToolParamType.STRING, required=True, description="解释"),
+        ],
+    )
+    async def tool_dict_set(self, term: str = "", explanation: str = "", **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        key = dnd_setup._coalesce_text(term, kwargs, "word", "name")
+        value = dnd_setup._coalesce_text(explanation, kwargs, "definition", "text", "meaning")
+        return dnd_setup.dict_set(record.root, key, value)
+
+    @Tool(
+        "dnd_dict_query",
+        brief_description="【地下城·筹备/查询】查询战役词典；term 留空时列出全部词条。",
+        parameters=[
+            ToolParameterInfo(name="term", param_type=ToolParamType.STRING, required=False, default="", description="词条；留空列出全部"),
+        ],
+    )
+    async def tool_dict_query(self, term: str = "", **kwargs: Any) -> dict[str, Any]:
+        stream_id = self._resolve_stream_id(kwargs)
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None:
+            return {"success": False, "content": "当前聊天没有进行中的地下城会话。"}
+        query = dnd_setup._coalesce_text(term, kwargs, "word", "name")
+        return dnd_setup.dict_query(record.root, query)
+
+    @Tool(
+        "dnd_review_ready",
+        brief_description="【地下城·筹备】检查战役圣经、GM 提示与报名玩家角色卡是否满足开跑条件。",
+        parameters=[],
+    )
+    async def tool_review_ready(self, **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        lifecycle = self._lifecycle()
+        enrolled = sorted(lifecycle.enrolled_ids(record))
+        return dnd_setup.review_ready(record.root, enrolled, list(self.config.mechanics.ability_scores))
+
+    @Tool(
+        "dnd_spawn_item",
+        brief_description="【地下城·筹备】生成物品到玩家背包或场景（state/scene-items.yaml）。",
+        parameters=[
+            ToolParameterInfo(name="item", param_type=ToolParamType.OBJECT, required=True, description="物品对象，至少含 id"),
+            ToolParameterInfo(name="give_to", param_type=ToolParamType.STRING, required=False, default="", description="给予的玩家 ID；留空则放入场景"),
+        ],
+    )
+    async def tool_spawn_item(self, item: Any = None, give_to: str = "", **kwargs: Any) -> dict[str, Any]:
+        record, error = await self._tool_setup_session(kwargs)
+        if error:
+            return {"success": False, "content": error}
+        assert record is not None
+        payload = item if isinstance(item, dict) else kwargs.get("item")
+        if not isinstance(payload, dict):
+            return {"success": False, "content": "请提供 item 对象。"}
+        target = dnd_setup._coalesce_text(give_to, kwargs, "player_id", "actor")
+        return dnd_setup.spawn_item(record.root, payload, target)
+
+    @Command(
+        "dnd_bible",
+        description="写入/追加战役圣经",
+        pattern=r"^/dnd\s+bible(?:\s+(?P<mode>append|replace))?\s+(?P<topic>\S+)\s+(?P<content>.+)\s*$",
+    )
+    async def cmd_bible(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, error = await self._require_setup(stream_id, user_id)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        topic = str(kwargs.get("topic") or "").strip()
+        content = str(kwargs.get("content") or "").strip()
+        mode = str(kwargs.get("mode") or "append").strip().lower()
+        result = dnd_setup.write_bible(record.root, topic, content, mode)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command(
+        "dnd_gm_prompt",
+        description="写入/追加 GM 补充提示",
+        pattern=r"^/dnd\s+gm-prompt(?:\s+(?P<mode>append|replace))?\s+(?P<content>.+)\s*$",
+    )
+    async def cmd_gm_prompt(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, error = await self._require_setup(stream_id, user_id)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        content = str(kwargs.get("content") or "").strip()
+        mode = str(kwargs.get("mode") or "replace").strip().lower()
+        result = dnd_setup.write_gm_prompt(record.root, content, mode)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command("dnd_review", description="检查战役就绪状态", pattern=r"^/dnd\s+review\s*$")
+    async def cmd_review(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, lifecycle, enrolled, error = await self._require_setup(stream_id, user_id)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        result = dnd_setup.review_ready(record.root, sorted(enrolled), list(self.config.mechanics.ability_scores))
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1
+
+    @Command(
+        "dnd_import_rules",
+        description="从 URL 导入规则书",
+        pattern=r"^/dnd\s+import-rules\s+(?P<url>\S+)\s*$",
+    )
+    async def cmd_import_rules(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, error = await self._require_setup(stream_id, user_id)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        url = str(kwargs.get("url") or "").strip()
+        try:
+            result = await dnd_setup.import_rulebook(
+                self.ctx.llm.generate,
+                record.root,
+                url,
+                max_bytes=int(self.config.session.rulebook_import_max_bytes),
+                model=str(self.config.session.gm_model),
+            )
+        except (ValueError, httpx.HTTPError) as exc:
+            message = str(exc)
+            await self._send(stream_id, message)
+            return False, message, 2
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command(
+        "dnd_dict_set",
+        description="写入战役词典词条",
+        pattern=r"^/dnd\s+dict\s+set\s+(?P<term>\S+)\s+(?P<explanation>.+)\s*$",
+    )
+    async def cmd_dict_set(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        user_id = self._resolve_user_id(kwargs)
+        record, error = await self._require_setup(stream_id, user_id)
+        if error:
+            await self._send(stream_id, error)
+            return False, error, 2
+        assert record is not None
+        term = str(kwargs.get("term") or "").strip()
+        explanation = str(kwargs.get("explanation") or "").strip()
+        result = dnd_setup.dict_set(record.root, term, explanation)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
+
+    @Command(
+        "dnd_dict",
+        description="查询战役词典",
+        pattern=r"^/dnd\s+dict(?:\s+(?P<term>\S+))?\s*$",
+    )
+    async def cmd_dict(self, **kwargs: Any) -> tuple[bool, str, int]:
+        stream_id = self._resolve_stream_id(kwargs)
+        lifecycle = self._lifecycle()
+        record = lifecycle.resolve_active(stream_id)
+        if record is None:
+            await self._send(stream_id, "当前聊天没有进行中的地下城会话。")
+            return False, "无会话", 2
+        term = str(kwargs.get("term") or "").strip()
+        result = dnd_setup.dict_query(record.root, term)
+        await self._send(stream_id, str(result["content"]))
+        return bool(result["success"]), str(result["content"]), 1 if result["success"] else 2
 
 
 def create_plugin() -> DndPlugin:

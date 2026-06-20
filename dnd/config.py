@@ -62,6 +62,10 @@ class SessionSectionConfig(PluginConfigBase):
     gm_model: str = Field(default="planner", description="GM 叙事使用的 LLM 任务名")
     gm_context_char_budget: int = Field(default=120000, description="GM 上下文字符预算上限")
     recent_beats_limit: int = Field(default=10, description="注入 GM 上下文的最近节拍条数")
+    rulebook_import_max_bytes: int = Field(
+        default=5 * 1024 * 1024,
+        description="规则书 URL 抓取最大字节数",
+    )
 
 
 class MechanicsSectionConfig(PluginConfigBase):
