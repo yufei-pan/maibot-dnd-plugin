@@ -7,6 +7,7 @@ from typing import Any
 
 from maibot_sdk import Command, MaiBotPlugin
 
+from dnd.broadcast import broadcast_system
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config
 from dnd.session.lifecycle import LifecycleService
 from dnd.session.permissions import can
@@ -105,14 +106,7 @@ class DndPlugin(MaiBotPlugin):
         self._coordinators.pop(stream_id, None)
 
     async def _send(self, stream_id: str, text: str) -> None:
-        if not stream_id:
-            return
-        prefix = self.config.broadcast.system_prefix
-        await self.ctx.send.text(
-            f"{prefix}{text}",
-            stream_id,
-            sync_to_maisaka_history=self.config.broadcast.sync_to_maisaka_history,
-        )
+        await broadcast_system(self.ctx, stream_id, text, self.config)
 
     async def _require_active(
         self,
