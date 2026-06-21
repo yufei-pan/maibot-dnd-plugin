@@ -2,7 +2,15 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+
+# Host 仅将 plugins/ 父目录加入 sys.path；本子包位于插件目录内，须显式加入以便 import dnd.*
+_PLUGIN_DIR = Path(__file__).resolve().parent
+_plugin_dir_str = str(_PLUGIN_DIR)
+if _plugin_dir_str not in sys.path:
+    sys.path.insert(0, _plugin_dir_str)
+
 from typing import Any
 
 import httpx
