@@ -59,12 +59,13 @@ git clone https://github.com/yufei-pan/maibot-dnd-plugin.git maibot-dnd-plugin
 
 ## 命令一览
 
-所有命令以 `/dnd` 为前缀，在绑定的群聊中发送。
+所有命令以 `/dnd` 为前缀，在绑定的群聊中发送。发送 `/dnd help` 可在群内查看玩家向帮助摘要。
 
 ### 会话管理
 
 | 命令 | 权限 | 说明 |
 | --- | --- | --- |
+| `/dnd help` | 任意 | 向群聊发送命令与玩法帮助 |
 | `/dnd new [标题]` | 创建者/管理员 | 创建新会话（默认标题「未命名战役」） |
 | `/dnd list` | 任意 | 列出本聊天所有会话 |
 | `/dnd status` | 任意 | 查看当前活跃会话状态 |
