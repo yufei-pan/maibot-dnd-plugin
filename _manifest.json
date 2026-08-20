@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "com.0-hz.maibot-dnd",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "name": "地下城 (MaiBot D&D)",
   "description": "在群聊中运行带规则裁判的 D&D 式会话：插件负责骰子、属性、物品与回合批处理，独立 GM 智能体负责叙事，麦麦作为报名玩家以自然语言参与。",
   "author": {
@@ -47,6 +47,7 @@
   ],
   "capabilities": [
     "config.get",
+    "chat.get_all_streams",
     "llm.generate",
     "send.text",
     "send.image",

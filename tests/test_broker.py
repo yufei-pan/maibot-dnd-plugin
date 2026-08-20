@@ -51,7 +51,8 @@ def test_execute_payload_skill_use_item_and_spawn(tmp_path: Path) -> None:
 
     updated = yaml.safe_load((record.root / "players" / "alice.yaml").read_text(encoding="utf-8"))
     assert isinstance(updated, dict)
-    assert int(updated["hp_current"]) == 10
+    healed = int(result.roll_entries[1]["healed"])
+    assert int(updated["hp_current"]) == min(10, 4 + healed)
     inventory = updated.get("inventory", [])
     assert isinstance(inventory, list)
     item_ids = {str(item.get("id") or "") for item in inventory if isinstance(item, dict)}

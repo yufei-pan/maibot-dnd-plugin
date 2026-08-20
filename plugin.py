@@ -5,7 +5,10 @@ from __future__ import annotations
 import shutil
 import sys
 import tomllib
+from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
 # Host 仅将 plugins/ 父目录加入 sys.path；本子包位于插件目录内，须显式加入以便 import dnd.*
 _PLUGIN_DIR = Path(__file__).resolve().parent
@@ -51,6 +54,21 @@ __all__ = ["CURRENT_CONFIG_VERSION", "DndConfig", "DndPlugin", "create_plugin", 
 
 
 SHIPPED_CONFIG_TEMPLATE_NAME = "config.default.toml"
+CONTEXT_ITEM_SCHEMA_VERSION = 1
+
+
+def _new_user_context_item(text: str) -> dict[str, Any]:
+    """构造 MaiBot 1.2 Hook 可反序列化的 UserMessageItem。"""
+
+    return {
+        "item_type": "UserMessageItem",
+        "meta": {
+            "item_id": uuid4().hex,
+            "logical_turn_id": None,
+            "timestamp": datetime.now().astimezone().isoformat(),
+        },
+        "parts": [{"type": "text", "text": text}],
+    }
 
 
 def _is_runner_generated_bare_config(config_path: Path) -> bool:
@@ -109,6 +127,7 @@ class DndPlugin(MaiBotPlugin):
         self._plugin_dir = Path(__file__).resolve().parent
         self._coordinators: dict[str, TurnCoordinator] = {}
         self._mai_person_id = ""
+        self._mai_person_ids_by_stream: dict[str, str] = {}
 
     async def on_load(self) -> None:
         if _restore_shipped_config_template(self._plugin_dir):
@@ -120,10 +139,13 @@ class DndPlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         self._coordinators.clear()
+        self._mai_person_ids_by_stream.clear()
         self.ctx.logger.info("地下城插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         merged, _, notes = _normalize_dnd_config(config_data, DndConfig().model_dump(mode="python"))
+        self._mai_person_ids_by_stream.clear()
+        await self._resolve_mai_person_id()
         if notes:
             self.ctx.logger.info("配置迁移: %s", "; ".join(notes))
 
@@ -184,13 +206,14 @@ class DndPlugin(MaiBotPlugin):
         return {"actor_id": user_id, "admin_ids": admin_ids, "open_mode": open_mode}
 
     async def _resolve_mai_person_id(self) -> None:
+        self._mai_person_id = ""
         override = str(self.config.session.maibot_person_id or "").strip()
         if override:
             self._mai_person_id = override
             return
         qq_account = await self.ctx.config.get("bot.qq_account", "")
         if not qq_account:
-            self.ctx.logger.warning("地下城：未配置 bot.qq_account，无法解析麦麦 person_id")
+            self.ctx.logger.info("地下城：未配置备用 bot.qq_account，将按聊天流的适配器账号解析麦麦")
             return
         person_id = await self.ctx.person.get_id("qq", str(qq_account))
         if not person_id:
@@ -198,6 +221,51 @@ class DndPlugin(MaiBotPlugin):
             return
         self._mai_person_id = str(person_id)
         self.ctx.logger.info("地下城：麦麦 person_id=%s", self._mai_person_id)
+
+    async def _get_mai_person_id(self, stream_id: str) -> str:
+        """优先按聊天流实际账号解析麦麦，旧 Host 回退到全局备用账号。"""
+
+        try:
+            override = str(self.config.session.maibot_person_id or "").strip()
+        except Exception:
+            override = ""
+        if override:
+            return override
+
+        normalized_stream_id = str(stream_id or "").strip()
+        if not normalized_stream_id:
+            return str(self._mai_person_id or "").strip()
+        cached = self._mai_person_ids_by_stream.get(normalized_stream_id)
+        if cached:
+            return cached
+
+        try:
+            raw_streams = await self.ctx.chat.get_all_streams(platform="all_platforms")
+            if isinstance(raw_streams, Mapping):
+                raw_streams = raw_streams.get("streams")
+            streams = raw_streams if isinstance(raw_streams, list) else []
+            for stream in streams:
+                if not isinstance(stream, Mapping):
+                    continue
+                candidate_id = str(stream.get("stream_id") or stream.get("session_id") or "").strip()
+                if candidate_id != normalized_stream_id:
+                    continue
+                platform = str(stream.get("platform") or "").strip()
+                account_id = str(stream.get("account_id") or "").strip()
+                if not platform or not account_id:
+                    break
+                person_id = await self.ctx.person.get_id(platform, account_id)
+                if isinstance(person_id, Mapping):
+                    person_id = person_id.get("person_id")
+                normalized_person_id = str(person_id or "").strip()
+                if normalized_person_id:
+                    self._mai_person_ids_by_stream[normalized_stream_id] = normalized_person_id
+                    return normalized_person_id
+                break
+        except Exception:
+            # 旧 Host、未声明能力或瞬时 RPC 失败时保留既有备用解析结果。
+            pass
+        return str(self._mai_person_id or "").strip()
 
     def _check(
         self,
@@ -1167,12 +1235,12 @@ class DndPlugin(MaiBotPlugin):
         if not stream_id:
             return {"action": "continue"}
 
-        bot_person_id = str(self._mai_person_id or "").strip()
-        if not bot_person_id:
-            return {"action": "continue"}
-
         lifecycle, record = self._resolve_running_session(stream_id)
         if record is None:
+            return {"action": "continue"}
+
+        bot_person_id = await self._get_mai_person_id(stream_id)
+        if not bot_person_id:
             return {"action": "continue"}
         if bot_person_id not in lifecycle.enrolled_ids(record):
             return {"action": "continue"}
@@ -1191,30 +1259,47 @@ class DndPlugin(MaiBotPlugin):
         if not stream_id:
             return {"action": "continue"}
 
-        bot_person_id = str(self._mai_person_id or "").strip()
-        if not bot_person_id:
-            return {"action": "continue"}
-
         lifecycle, record = self._resolve_running_session(stream_id)
         if record is None:
+            return {"action": "continue"}
+
+        bot_person_id = await self._get_mai_person_id(stream_id)
+        if not bot_person_id:
             return {"action": "continue"}
         if bot_person_id not in lifecycle.enrolled_ids(record):
             return {"action": "continue"}
 
+        items = kwargs.get("items")
+        use_context_items = (
+            isinstance(items, list)
+            and kwargs.get("item_schema_version") == CONTEXT_ITEM_SCHEMA_VERSION
+        )
         messages = kwargs.get("messages")
-        if not isinstance(messages, list):
+        if not use_context_items and not isinstance(messages, list):
             return {"action": "continue"}
 
         character_name = load_character_name(record.root, bot_person_id)
         scene_brief = load_scene_brief(record.root)
         briefing = build_player_briefing(character_name, scene_brief)
 
-        insert_at = 0
-        for index, item in enumerate(messages):
-            if isinstance(item, dict) and item.get("role") == "system":
-                insert_at = index + 1
-        messages.insert(insert_at, {"role": "user", "content": briefing})
-        kwargs["messages"] = messages
+        if use_context_items:
+            new_items = list(items)
+            insert_at = 0
+            for index, item in enumerate(new_items):
+                if isinstance(item, dict) and item.get("item_type") == "SystemMessageItem":
+                    insert_at = index + 1
+            new_items.insert(
+                insert_at,
+                _new_user_context_item(briefing),
+            )
+            kwargs["items"] = new_items
+        else:
+            insert_at = 0
+            for index, item in enumerate(messages):
+                if isinstance(item, dict) and item.get("role") == "system":
+                    insert_at = index + 1
+            messages.insert(insert_at, {"role": "user", "content": briefing})
+            kwargs["messages"] = messages
         return {"action": "continue", "modified_kwargs": kwargs}
 
     @EventHandler("dnd_capture_enrolled_human_message", event_type=EventType.ON_MESSAGE)
@@ -1232,7 +1317,11 @@ class DndPlugin(MaiBotPlugin):
         if not user_id:
             return None
 
-        bot_person_id = str(self._mai_person_id or "").strip()
+        _lifecycle, record = self._resolve_running_session(stream_id)
+        if record is None:
+            return None
+
+        bot_person_id = await self._get_mai_person_id(stream_id)
         if bot_person_id and user_id == bot_person_id:
             return None
 

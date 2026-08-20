@@ -335,7 +335,7 @@ async def run_beat(
         message_parts.append("反馈：\n" + "\n".join(execution.feedback_lines))
     await broadcast_gm(ctx, session.stream_id, "\n\n".join(message_parts).strip(), config)
 
-    bot_person_id = str(getattr(plugin_instance, "_mai_person_id", "")).strip()
+    bot_person_id = await _resolve_plugin_bot_person_id(plugin_instance, session.stream_id)
     if bot_person_id and active_player == bot_person_id:
         await wake_mai_turn(
             ctx,
@@ -356,3 +356,13 @@ async def run_beat(
         narration=payload.narration,
     )
 
+
+async def _resolve_plugin_bot_person_id(plugin_instance: Any, stream_id: str) -> str:
+    """解析当前聊天流的麦麦 person_id，并兼容旧测试替身与插件实例。"""
+
+    resolver = getattr(plugin_instance, "_get_mai_person_id", None)
+    if callable(resolver):
+        resolved = str(await resolver(stream_id) or "").strip()
+        if resolved:
+            return resolved
+    return str(getattr(plugin_instance, "_mai_person_id", "") or "").strip()

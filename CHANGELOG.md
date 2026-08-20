@@ -5,6 +5,14 @@
 格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.1.1] - 2026-08-19
+
+### 修复
+
+- 兼容 MaiBot 1.2.0 的 Item-first replyer Hook 载荷，同时保留旧版 `messages` 载荷支持
+- 多账号环境按当前聊天流的适配器账号解析麦麦 person_id，并保留显式配置与 `bot.qq_account` 回退
+- 仅在存在进行中的战役时才按聊天流解析麦麦身份，避免对无关聊天发起 `get_all_streams`
+
 ## [0.1.0] - 2026-08-01
 
 ### 新增
