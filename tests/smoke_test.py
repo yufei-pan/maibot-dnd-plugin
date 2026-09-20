@@ -17,6 +17,7 @@ sys.path.insert(0, str(PLUGIN_DIR.parent / "maibot-plugin-sdk"))
 import plugin as dnd_plugin  # noqa: E402
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config  # noqa: E402
 from dnd.gm.parser import DND_BEAT_JSON_MARKER, parse_gm_response  # noqa: E402
+from dnd.llm_route import resolve_llm_route  # noqa: E402
 from dnd.mechanics.sheets import CharacterSheet  # noqa: E402
 from dnd.session.readiness import campaign_readiness, session_readiness  # noqa: E402
 
@@ -33,6 +34,12 @@ def test_create_plugin_and_config_version() -> None:
     assert inst.plugin_id == "maibot-dnd-plugin"
     cfg = DndConfig()
     assert cfg.plugin.config_version == CURRENT_CONFIG_VERSION
+
+
+def test_resolve_llm_route() -> None:
+    assert resolve_llm_route("planner", ["utils", "planner", "replyer"]) == ("planner", None)
+    assert resolve_llm_route("step-5-preview", ["utils", "planner"]) == (None, "step-5-preview")
+    assert resolve_llm_route("planner", None) == ("planner", None)
 
 
 def test_normalize_config_empty() -> None:
@@ -108,6 +115,7 @@ def test_readiness_gates() -> None:
 
 def _run_all() -> None:
     test_create_plugin_and_config_version()
+    test_resolve_llm_route()
     test_normalize_config_empty()
     test_normalize_config_version_migration()
     test_normalize_config_merge_current()

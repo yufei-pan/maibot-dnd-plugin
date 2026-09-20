@@ -14,6 +14,7 @@ from dnd.broadcast import broadcast_gm, wake_mai_turn
 from dnd.config import DndConfig
 from dnd.gm.context import build_gm_messages
 from dnd.gm.parser import DND_BEAT_JSON_MARKER, GMBeatPayload, parse_gm_response
+from dnd.llm_route import host_generate
 from dnd.mechanics.engine import MechanicsEngine, MechanicsOutcome
 from dnd.mechanics.items import execute_spawn_item, execute_use_item
 from dnd.mechanics.sheets import CharacterSheet
@@ -152,7 +153,7 @@ def _write_turn_yaml(session_root: Path, active_player: str, initiative: list[st
 
 
 async def _call_gm_once(ctx: Any, messages: list[dict[str, str]], model: str) -> str:
-    result = await ctx.llm.generate(prompt=messages, model=model)
+    result = await host_generate(ctx.llm, messages, model)
     if not isinstance(result, dict):
         raise ValueError("GM 模型返回值无效")
     if not bool(result.get("success")):

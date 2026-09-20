@@ -28,6 +28,7 @@ from dnd.broadcast import broadcast_system
 from dnd.config import CURRENT_CONFIG_VERSION, DndConfig, _normalize_dnd_config
 from dnd.gm.broker import run_beat
 from dnd.help import build_help_message
+from dnd.llm_route import host_generate
 from dnd.hooks import (
     build_player_briefing,
     extract_plain_text,
@@ -128,6 +129,9 @@ class DndPlugin(MaiBotPlugin):
         self._coordinators: dict[str, TurnCoordinator] = {}
         self._mai_person_id = ""
         self._mai_person_ids_by_stream: dict[str, str] = {}
+
+    async def _routed_llm_generate(self, prompt: Any = None, model: str = "", **kwargs: Any) -> Any:
+        return await host_generate(self.ctx.llm, prompt, model, **kwargs)
 
     async def on_load(self) -> None:
         if _restore_shipped_config_template(self._plugin_dir):
@@ -796,7 +800,7 @@ class DndPlugin(MaiBotPlugin):
         target_url = dnd_setup._coalesce_text(url, kwargs, "link", "source")
         try:
             return await dnd_setup.import_rulebook(
-                self.ctx.llm.generate,
+                self._routed_llm_generate,
                 record.root,
                 target_url,
                 max_bytes=int(self.config.session.rulebook_import_max_bytes),
@@ -939,7 +943,7 @@ class DndPlugin(MaiBotPlugin):
         url = str(kwargs.get("url") or "").strip()
         try:
             result = await dnd_setup.import_rulebook(
-                self.ctx.llm.generate,
+                self._routed_llm_generate,
                 record.root,
                 url,
                 max_bytes=int(self.config.session.rulebook_import_max_bytes),
